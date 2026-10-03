@@ -1,0 +1,693 @@
+// Dev runs on SQLite for zero-setup; the schema avoids SQLite-only features
+// so switching provider to "postgresql" is a one-line change before staging —
+// with the matching one-liner in lib/db.ts icontains(). Export/import the data
+// with scripts/db-export.mjs then scripts/db-import.mjs.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  sessions     Session[]
+  memberships  Membership[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Workspace {
+  id            String         @id @default(cuid())
+  name          String
+  plan          String         @default("free")
+  credits       Int            @default(1000)
+  // Agency mode: a sub-workspace belongs to the agency that created it and
+  // inherits its white-label branding.
+  parentWorkspaceId String?
+  brandName     String         @default("")
+  brandColor    String         @default("")
+  brandLogoUrl  String         @default("")
+  stripeCustomerId     String  @default("")
+  stripeSubscriptionId String  @default("")
+  planStatus    String         @default("active") // active | past_due | canceled
+  slackWebhookUrl String       @default("")
+  createdAt     DateTime       @default(now())
+  memberships   Membership[]
+  invitations   Invitation[]
+  emailAccounts EmailAccount[]
+  campaigns     Campaign[]
+  leadsRecords  Lead[]
+  leadLists     LeadList[]
+  parent         Workspace?     @relation("AgencyChildren", fields: [parentWorkspaceId], references: [id], onDelete: SetNull)
+  children       Workspace[]    @relation("AgencyChildren")
+  deliverability DeliverabilityTest[]
+  savedSearches  SavedSearch[]
+  visitorEvents  VisitorEvent[]
+  agents         Agent[]
+  memory         MemoryRecord[]
+  agentTasks     AgentTask[]
+  copilotThreads CopilotThread[]
+  toolPermissions ToolPermission[]
+  managedDomains  ManagedDomain[]
+  phoneNumbers    PhoneNumber[]
+  smsMessages     SmsMessage[]
+  callLogs        CallLog[]
+  marketplaceOrders MarketplaceOrder[]
+
+  @@index([parentWorkspaceId])
+}
+
+model LeadList {
+  id          String           @id @default(cuid())
+  workspaceId String
+  name        String
+  createdAt   DateTime         @default(now())
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  items       LeadListItem[]
+
+  @@unique([workspaceId, name])
+}
+
+model LeadListItem {
+  id     String   @id @default(cuid())
+  listId String
+  leadId String
+  list   LeadList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  lead   Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@unique([listId, leadId])
+}
+
+model CreditLedger {
+  id          String   @id @default(cuid())
+  workspaceId String
+  delta       Int // negative = spend
+  reason      String
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId, createdAt])
+}
+
+model Opportunity {
+  id           String   @id @default(cuid())
+  workspaceId  String
+  threadId     String?  @unique
+  contactEmail String
+  name         String
+  stage        String   @default("interested") // interested | meeting_booked | meeting_completed | won | lost
+  value        Int      @default(0) // whole dollars
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([workspaceId, stage])
+}
+
+model BlocklistEntry {
+  id          String   @id @default(cuid())
+  workspaceId String
+  value       String // full email or bare domain
+  createdAt   DateTime @default(now())
+
+  @@unique([workspaceId, value])
+}
+
+model Membership {
+  id          String    @id @default(cuid())
+  userId      String
+  workspaceId String
+  role        String // "owner" | "admin" | "member"
+  createdAt   DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId])
+  @@index([workspaceId])
+}
+
+model Invitation {
+  id          String    @id @default(cuid())
+  workspaceId String
+  email       String
+  role        String    @default("member")
+  token       String    @unique
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+model EmailAccount {
+  id               String    @id @default(cuid())
+  workspaceId      String
+  email            String
+  senderFirstName  String    @default("")
+  senderLastName   String    @default("")
+  provider         String // "smtp" | "google" | "microsoft"
+  // AES-256-GCM encrypted JSON: SMTP/IMAP credentials or OAuth tokens.
+  credentials      String
+  status           String    @default("pending") // "pending" | "connected" | "error"
+  statusMessage    String    @default("")
+  dailyLimit       Int       @default(30)
+  sentToday        Int       @default(0)
+  sentTodayDate    String    @default("") // YYYY-MM-DD the counter belongs to
+  warmupEnabled    Boolean   @default(false)
+  tags             String    @default("[]") // JSON array of strings
+  lastCheckedAt    DateTime?
+  lastSyncAt       DateTime?
+  lastSeenUid      Int       @default(0) // INBOX UID high-water mark for sync
+  warmupSentToday  Int       @default(0)
+  warmupDate       String    @default("") // YYYY-MM-DD for the warmup counter
+  warmupReceived   Int       @default(0) // lifetime warmup emails received
+  warmupRescued    Int       @default(0) // warmup emails moved out of spam
+  dnsHealth        String    @default("{}") // {spf,dkim,dmarc,mx: bool|null}
+  dnsCheckedAt     DateTime?
+  // Opting in lets this mailbox exchange warmup mail with other workspaces'
+  // opted-in mailboxes; without it the pool is only this workspace's own.
+  warmupPoolOptIn  Boolean   @default(false)
+  warmupStartedAt  DateTime?
+  warmupTarget     Int       @default(20) // ceiling the daily ramp climbs to
+  createdAt        DateTime  @default(now())
+  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaigns        CampaignAccount[]
+  messages         Message[]
+  deliverability   DeliverabilityTest[]
+
+  @@unique([workspaceId, email])
+  @@index([workspaceId, status])
+}
+
+model Campaign {
+  id             String   @id @default(cuid())
+  workspaceId    String
+  name           String
+  status         String   @default("draft") // "draft" | "active" | "paused" | "completed"
+  timezone       String   @default("America/Phoenix")
+  sendDays       String   @default("[1,2,3,4,5]") // JSON array, 0=Sun..6=Sat
+  windowStart    Int      @default(9) // hour of day, inclusive
+  windowEnd      Int      @default(17) // hour of day, exclusive
+  dailyLimit     Int      @default(30)
+  gapMinutes     Int      @default(9)
+  gapJitter      Int      @default(3)
+  trackOpens     Boolean  @default(true)
+  trackClicks    Boolean  @default(false)
+  stopOnReply    Boolean  @default(true)
+  unsubscribeLink Boolean @default(true)
+  createdAt      DateTime @default(now())
+  workspace      Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  steps          SequenceStep[]
+  accounts       CampaignAccount[]
+  leads          CampaignLead[]
+  messages       Message[]
+
+  @@index([workspaceId, status])
+}
+
+model CampaignAccount {
+  id         String       @id @default(cuid())
+  campaignId String
+  accountId  String
+  campaign   Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  account    EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, accountId])
+}
+
+model SequenceStep {
+  id         String    @id @default(cuid())
+  campaignId String
+  order      Int
+  waitDays   Int       @default(1) // wait before this step (ignored for step 1)
+  // "email" | "sms" — an sms step sends the variant body as a text.
+  channel    String    @default("email")
+  campaign   Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  variants   Variant[]
+  messages   Message[]
+
+  @@index([campaignId, order])
+}
+
+model Variant {
+  id       String       @id @default(cuid())
+  stepId   String
+  label    String       @default("A")
+  subject  String       @default("")
+  body     String       @default("")
+  enabled  Boolean      @default(true)
+  step     SequenceStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  messages Message[]
+}
+
+model Lead {
+  id            String         @id @default(cuid())
+  workspaceId   String
+  email         String
+  firstName     String         @default("")
+  lastName      String         @default("")
+  company       String         @default("")
+  title         String         @default("")
+  customFields  String         @default("{}") // JSON object
+  phone         String         @default("")
+  // SMS needs consent on file; an empty value means never texted.
+  smsConsent    String         @default("") // "" | "explicit" | "implied"
+  smsOptOutAt   DateTime?
+  visitorEvents VisitorEvent[]
+  agentTasks    AgentTask[]
+  smsMessages   SmsMessage[]
+  callLogs      CallLog[]
+  verifyStatus  String         @default("unverified") // "unverified" | "valid" | "risky" | "invalid"
+  createdAt     DateTime       @default(now())
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaignLeads CampaignLead[]
+  listItems     LeadListItem[]
+
+  @@unique([workspaceId, email])
+}
+
+model CampaignLead {
+  id          String    @id @default(cuid())
+  campaignId  String
+  leadId      String
+  // "pending" | "in_sequence" | "completed" | "replied" | "bounced" |
+  // "unsubscribed" | "stopped" | "error"
+  status      String    @default("pending")
+  statusNote  String    @default("")
+  currentStep Int       @default(0) // steps completed so far
+  nextSendAt  DateTime?
+  createdAt   DateTime  @default(now())
+  campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead        Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  messages    Message[]
+
+  @@unique([campaignId, leadId])
+  @@index([campaignId, status, nextSendAt])
+}
+
+model Message {
+  id             String        @id @default(cuid())
+  workspaceId    String
+  campaignId     String?
+  campaignLeadId String?
+  accountId      String?
+  stepId         String?
+  variantId      String?
+  threadId       String?
+  direction      String        @default("out") // "out" | "in"
+  toEmail        String
+  fromEmail      String        @default("")
+  subject        String
+  bodyText       String        @default("")
+  messageId      String        @default("") // RFC 5322 Message-ID
+  inReplyTo      String        @default("")
+  kind           String        @default("normal") // "normal" | "reply" | "auto_reply" | "bounce"
+  trackingToken  String        @unique
+  sentAt         DateTime      @default(now())
+  openedAt       DateTime?
+  openCount      Int           @default(0)
+  clickCount     Int           @default(0)
+  campaign       Campaign?     @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  campaignLead   CampaignLead? @relation(fields: [campaignLeadId], references: [id], onDelete: SetNull)
+  account        EmailAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  step           SequenceStep? @relation(fields: [stepId], references: [id], onDelete: SetNull)
+  variant        Variant?      @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  thread         Thread?       @relation(fields: [threadId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, sentAt])
+  @@index([workspaceId, sentAt])
+  @@index([workspaceId, messageId])
+}
+
+model Thread {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  accountId     String?
+  leadId        String?
+  campaignId    String?
+  subject       String    @default("")
+  snippet       String    @default("")
+  contactEmail  String    @default("")
+  label         String    @default("") // "" | "lead" | "interested" | "meeting_booked" | "meeting_completed" | "won" | "out_of_office" | "wrong_person" | "not_interested" | "lost"
+  unread        Boolean   @default(true)
+  done          Boolean   @default(false)
+  reminderAt    DateTime?
+  lastMessageAt DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+  messages      Message[]
+
+  @@index([workspaceId, done, lastMessageAt])
+  @@index([workspaceId, label])
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  prefix      String
+  keyHash     String    @unique
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+
+  @@index([workspaceId])
+}
+
+model Webhook {
+  id          String   @id @default(cuid())
+  workspaceId String
+  url         String
+  events      String   @default("[]") // JSON array: reply_received, bounce_received, lead_unsubscribed, campaign_completed
+  secret      String   @default("")
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId])
+}
+
+model Unsubscribe {
+  id          String   @id @default(cuid())
+  workspaceId String
+  email       String
+  createdAt   DateTime @default(now())
+
+  @@unique([workspaceId, email])
+}
+
+model DeliverabilityTest {
+  id          String        @id @default(cuid())
+  workspaceId String
+  accountId   String?
+  campaignId  String?
+  kind        String // "dns" | "content" | "placement"
+  score       Int           @default(0) // 0-100, higher is better
+  summary     String        @default("")
+  details     String        @default("{}") // JSON: per-check results
+  createdAt   DateTime      @default(now())
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account     EmailAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, kind, createdAt])
+}
+
+model SavedSearch {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  filter      String    @default("{}") // JSON filter DSL, shared with the search API
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, name])
+}
+
+model VisitorEvent {
+  id          String    @id @default(cuid())
+  workspaceId String
+  // First-party id minted by the snippet, so repeat visits group together.
+  visitorId   String
+  url         String
+  referrer    String    @default("")
+  // Hashed, never raw: identifying a visitor is the point, storing their
+  // address is a liability.
+  ipHash      String    @default("")
+  userAgent   String    @default("")
+  // Set when the visit arrived through a tracked campaign link.
+  leadId      String?
+  campaignId  String?
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead        Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, visitorId])
+}
+
+model Agent {
+  id              String       @id @default(cuid())
+  workspaceId     String
+  name            String
+  status          String       @default("paused") // paused | active
+  // The campaign the agent feeds. Created on its first run so an agent can be
+  // configured before it owns anything.
+  campaignId      String?
+  dailyLeadTarget Int          @default(10)
+  // Off by default: an agent that mails strangers without a human saying yes is
+  // a liability, not a feature.
+  autoApprove     Boolean      @default(false)
+  icp             String       @default("") // who to prefer, free text
+  lastRunAt       DateTime?
+  createdAt       DateTime     @default(now())
+  workspace       Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  events          AgentEvent[]
+  tasks           AgentTask[]
+
+  @@index([workspaceId, status])
+}
+
+model AgentEvent {
+  id        String   @id @default(cuid())
+  agentId   String
+  // found | proposed | queued | approved | rejected | campaign_created |
+  // escalated | idle | error | status
+  kind      String
+  message   String
+  createdAt DateTime @default(now())
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, createdAt])
+}
+
+model AgentTask {
+  id          String    @id @default(cuid())
+  workspaceId String
+  agentId     String
+  type        String // lead_approval | reply_escalation
+  status      String    @default("pending") // pending | approved | rejected | done
+  leadId      String?
+  threadId    String?
+  note        String    @default("")
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  lead        Lead?     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, type, leadId])
+  @@index([workspaceId, status])
+}
+
+model MemoryRecord {
+  id          String    @id @default(cuid())
+  workspaceId String
+  kind        String // business | offer | icp | rule
+  content     String
+  enabled     Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, kind])
+}
+
+model CopilotThread {
+  id          String           @id @default(cuid())
+  workspaceId String
+  userId      String
+  title       String           @default("New chat")
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages    CopilotMessage[]
+  toolCalls   CopilotToolCall[]
+
+  @@index([workspaceId, userId, updatedAt])
+}
+
+model CopilotMessage {
+  id        String        @id @default(cuid())
+  threadId  String
+  role      String // "user" | "assistant"
+  // The turn's content blocks verbatim as JSON. Stored whole rather than as
+  // text because thinking and tool_use blocks must be replayed to the API
+  // exactly as received.
+  content   String
+  createdAt DateTime      @default(now())
+  thread    CopilotThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+}
+
+model CopilotToolCall {
+  id         String        @id @default(cuid())
+  threadId   String
+  toolUseId  String        @unique
+  name       String
+  input      String        @default("{}")
+  // auto = a read-only tool that ran without asking; pending = waiting on a
+  // human; approved/denied = they answered.
+  status     String        @default("pending")
+  result     String?
+  isError    Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+  resolvedAt DateTime?
+  thread     CopilotThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, status])
+}
+
+model ToolPermission {
+  id          String    @id @default(cuid())
+  workspaceId String
+  tool        String
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, tool])
+}
+
+model ManagedDomain {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  // byo = the customer registered it themselves; registrar = we bought it
+  // through a configured registrar adapter.
+  source      String    @default("byo")
+  // pending -> dns_pending -> verified, or failed with a reason.
+  status      String    @default("pending")
+  // Which mail host the DNS plan points at: smtp | google | microsoft.
+  mailProvider String   @default("smtp")
+  dnsRecords  String    @default("[]") // JSON: the records the user must set
+  dnsCheckedAt DateTime?
+  lastError   String    @default("")
+  // Parked domains should resolve somewhere rather than 404 — a bare sending
+  // domain with no site is itself a spam signal.
+  redirectUrl String    @default("")
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailboxes   ManagedMailbox[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, status])
+}
+
+model ManagedMailbox {
+  id          String        @id @default(cuid())
+  workspaceId String
+  domainId    String
+  email       String
+  firstName   String        @default("")
+  lastName    String        @default("")
+  // pending -> awaiting_credentials (BYO) or provisioning (hosted) -> ready
+  status      String        @default("pending")
+  // The EmailAccount this became once connected.
+  accountId   String?
+  lastError   String        @default("")
+  createdAt   DateTime      @default(now())
+  domain      ManagedDomain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, email])
+  @@index([domainId, status])
+}
+
+model MarketplaceOrder {
+  id              String    @id @default(cuid())
+  workspaceId     String
+  // draft -> awaiting_payment -> paid -> provisioning -> complete | failed
+  status          String    @default("draft")
+  domainName      String
+  source          String    @default("byo")
+  mailboxCount    Int       @default(1)
+  amountCents     Int       @default(0)
+  stripeSessionId String    @default("")
+  createdAt       DateTime  @default(now())
+  completedAt     DateTime?
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status])
+}
+
+model PhoneNumber {
+  id          String    @id @default(cuid())
+  workspaceId String
+  // E.164, e.g. +14805550123
+  number      String
+  label       String    @default("")
+  // Twilio's own identifier, when the number came from there.
+  providerSid String    @default("")
+  capabilities String   @default("{}") // JSON: {sms,voice,mms}
+  smsEnabled  Boolean   @default(true)
+  dailySmsLimit Int     @default(50)
+  sentToday   Int       @default(0)
+  sentTodayDate String  @default("")
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  smsMessages SmsMessage[]
+  callLogs    CallLog[]
+
+  @@unique([workspaceId, number])
+}
+
+model SmsMessage {
+  id             String       @id @default(cuid())
+  workspaceId    String
+  numberId       String?
+  leadId         String?
+  campaignId     String?
+  campaignLeadId String?
+  stepId         String?
+  threadId       String?
+  direction      String       @default("out") // "out" | "in"
+  toNumber       String
+  fromNumber     String
+  body           String
+  // queued -> sent -> delivered | undelivered | failed, from Twilio callbacks.
+  status         String       @default("queued")
+  providerSid    String       @default("")
+  errorMessage   String       @default("")
+  createdAt      DateTime     @default(now())
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  number         PhoneNumber? @relation(fields: [numberId], references: [id], onDelete: SetNull)
+  lead           Lead?        @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([providerSid])
+}
+
+model CallLog {
+  id          String       @id @default(cuid())
+  workspaceId String
+  numberId    String?
+  leadId      String?
+  campaignId  String?
+  direction   String       @default("out")
+  toNumber    String
+  fromNumber  String
+  // Twilio call state, or "logged" for a call a human made and recorded.
+  status      String       @default("queued")
+  // What came of it: no_answer | voicemail | connected | meeting_booked |
+  // not_interested | wrong_number
+  outcome     String       @default("")
+  notes       String       @default("")
+  durationSec Int          @default(0)
+  providerSid String       @default("")
+  createdAt   DateTime     @default(now())
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  number      PhoneNumber? @relation(fields: [numberId], references: [id], onDelete: SetNull)
+  lead        Lead?        @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+}
