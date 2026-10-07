@@ -1,13 +1,14 @@
-// Dev runs on SQLite for zero-setup; the schema avoids SQLite-only features
-// so switching provider to "postgresql" is a one-line change before staging —
-// with the matching one-liner in lib/db.ts icontains(). Export/import the data
-// with scripts/db-export.mjs then scripts/db-import.mjs.
+// Postgres, hosted. Local dev points DATABASE_URL at the same instance: there
+// is no local Postgres on this machine, and SQLite cannot back a serverless
+// deploy, which has no writable disk. The matching case-sensitivity switch
+// lives in lib/db.ts icontains(). Move data with scripts/db-export.mjs then
+// scripts/db-import.mjs.
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

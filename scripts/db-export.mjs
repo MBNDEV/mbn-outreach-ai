@@ -2,6 +2,7 @@
 // fresh database. Run against the OLD database before switching providers:
 //   node scripts/db-export.mjs [outfile]
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 import { PrismaClient } from "@prisma/client";
 
 export const ORDER = [
@@ -18,7 +19,7 @@ export const ORDER = [
 
 const lower = (s) => s.charAt(0).toLowerCase() + s.slice(1);
 
-if (import.meta.url === `file://${process.argv[1].replace(/\/g, "/")}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const out = process.argv[2] ?? "../db-export.json";
   const db = new PrismaClient();
   const schema = fs.readFileSync("prisma/schema.prisma", "utf8");
